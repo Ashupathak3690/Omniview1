@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 interface BrowserGridProps {
     url: string;
@@ -10,40 +10,92 @@ interface FrameData {
     currentUrl: string;
     key: number; // Used to force iframe reload
     isLocked: boolean; // If true, doesn't sync with master URL
+    status: 'idle' | 'scheduled' | 'active'; // Track loading state
 }
 
 const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
     const [frames, setFrames] = useState<FrameData[]>([]);
-    const [scale, setScale] = useState(0.75); // Default scaled down for better visibility
+    const [scale, setScale] = useState(0.75); 
     const [isSyncing, setIsSyncing] = useState(true);
+    const [isStateless, setIsStateless] = useState(false); // Strict Sandbox Mode
+    const [isCacheBust, setIsCacheBust] = useState(false); // Cache busting
+    const [loadingDelay, setLoadingDelay] = useState(800); // ms between loads
     
+    // Refs to manage timeouts preventing memory leaks
+    const timeoutsRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+
     // Initialize frames
     useEffect(() => {
         setFrames(Array(count).fill(null).map((_, i) => ({
             id: i,
-            currentUrl: masterUrl || '',
+            currentUrl: '',
             key: 0,
-            isLocked: false
+            isLocked: false,
+            status: 'idle'
         })));
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []); 
+        return () => clearTimeouts();
+    }, [count]);
 
-    // Sync with master URL
+    const clearTimeouts = () => {
+        timeoutsRef.current.forEach(t => clearTimeout(t));
+        timeoutsRef.current = [];
+    };
+
+    // Helper to schedule frames sequentially
+    const scheduleFrames = (framesToSchedule: number[]) => {
+        clearTimeouts();
+        
+        framesToSchedule.forEach((frameId, index) => {
+            const timeout = setTimeout(() => {
+                setFrames(prev => prev.map(f => {
+                    if (f.id === frameId) {
+                        return {
+                            ...f,
+                            status: 'active',
+                            key: f.key + 1 // Force reload
+                        };
+                    }
+                    return f;
+                }));
+            }, index * loadingDelay);
+            timeoutsRef.current.push(timeout);
+        });
+    };
+
+    // Effect for Master URL changes
     useEffect(() => {
         if (isSyncing && masterUrl) {
-            setFrames(prev => prev.map(f => 
-                f.isLocked ? f : { ...f, currentUrl: masterUrl, key: f.key + 1 }
-            ));
+            // 1. Set all relevant frames to scheduled state immediately
+            setFrames(prev => prev.map(f => {
+                if (f.isLocked) return f;
+                return { ...f, currentUrl: masterUrl, status: 'scheduled' };
+            }));
+
+            // 2. Trigger the sequencer
+            const unlockedIds = frames.filter(f => !f.isLocked).map(f => f.id);
+            // We use a slight delay to ensure state update #1 has processed or simply call sequencer
+            // But we can't access updated 'frames' state inside this effect immediately if we used it directly.
+            // Using IDs is safer.
+            scheduleFrames(unlockedIds);
+        } else if (!masterUrl) {
+            // Reset if empty
+             setFrames(prev => prev.map(f => f.isLocked ? f : { ...f, currentUrl: '', status: 'idle' }));
         }
-    }, [masterUrl, isSyncing]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [masterUrl, isSyncing, loadingDelay]); 
 
     const getDisplayUrl = (urlStr: string) => {
         if (!urlStr) return '';
         let final = urlStr.trim();
-        // Auto-prepend https if missing
         if (!final.startsWith('http://') && !final.startsWith('https://')) {
             final = `https://${final}`;
         }
+        
+        if (isCacheBust) {
+            const separator = final.includes('?') ? '&' : '?';
+            final = `${final}${separator}_cb=${Date.now()}`;
+        }
+
         return final;
     };
 
@@ -52,15 +104,37 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
     };
 
     const handleRefreshAll = () => {
-        setFrames(prev => prev.map(f => ({ ...f, key: f.key + 1 })));
+        // 1. Set all active/unlocked frames to scheduled
+        const framesToRefresh = frames.filter(f => f.currentUrl && (!f.isLocked || f.status !== 'idle')).map(f => f.id);
+        
+        setFrames(prev => prev.map(f => {
+            if (framesToRefresh.includes(f.id)) {
+                return { ...f, status: 'scheduled' };
+            }
+            return f;
+        }));
+
+        // 2. Schedule them
+        scheduleFrames(framesToRefresh);
     };
 
     const handleUrlChange = (id: number, newUrl: string) => {
-        setFrames(prev => prev.map(f => f.id === id ? { ...f, currentUrl: newUrl, isLocked: true } : f));
+        setFrames(prev => prev.map(f => f.id === id ? { 
+            ...f, 
+            currentUrl: newUrl, 
+            isLocked: true,
+            status: 'active' 
+        } : f));
     };
 
     const toggleLock = (id: number) => {
         setFrames(prev => prev.map(f => f.id === id ? { ...f, isLocked: !f.isLocked } : f));
+    };
+
+    // Strict Mode: Removes 'allow-same-origin' to prevent cookie sharing
+    const getSandboxRules = () => {
+        const base = "allow-scripts allow-forms allow-popups allow-modals allow-popups-to-escape-sandbox allow-downloads";
+        return isStateless ? base : `${base} allow-same-origin`;
     };
 
     return (
@@ -76,12 +150,12 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
 
                     <button 
                         onClick={handleRefreshAll}
-                        className="flex items-center space-x-1 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-sm transition-colors shadow-sm"
+                        className="flex items-center space-x-1 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-sm transition-colors shadow-sm active:transform active:scale-95"
                     >
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                         </svg>
-                        <span>Refresh All</span>
+                        <span>Refresh All (Seq)</span>
                     </button>
 
                     <div className="flex items-center space-x-2 bg-slate-800 rounded px-3 py-1.5 border border-slate-700">
@@ -93,6 +167,49 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                             className="rounded border-slate-600 text-indigo-500 focus:ring-indigo-500 bg-slate-700 h-4 w-4"
                         />
                         <label htmlFor="syncToggle" className="text-sm text-slate-300 cursor-pointer select-none">Sync URLs</label>
+                    </div>
+
+                    {/* Sequential Delay Control */}
+                    <div className="flex items-center space-x-2 bg-slate-800 rounded px-3 py-1.5 border border-slate-700" title="Delay between loading each browser to prevent rate limiting">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <select 
+                            value={loadingDelay}
+                            onChange={(e) => setLoadingDelay(Number(e.target.value))}
+                            className="bg-transparent text-sm text-slate-300 border-none focus:ring-0 cursor-pointer py-0 pl-0 pr-6"
+                        >
+                            <option value={200}>Fast (0.2s)</option>
+                            <option value={800}>Normal (0.8s)</option>
+                            <option value={2000}>Slow (2s)</option>
+                            <option value={5000}>Safe (5s)</option>
+                        </select>
+                    </div>
+
+                    <div className="h-6 w-px bg-slate-700 mx-2 hidden sm:block"></div>
+
+                    {/* Stateless Mode Toggle */}
+                    <div 
+                        className={`flex items-center space-x-2 rounded px-3 py-1.5 border transition-all cursor-pointer select-none ${isStateless ? 'bg-pink-900/30 border-pink-700/50' : 'bg-slate-800 border-slate-700 hover:border-slate-600'}`}
+                        onClick={() => setIsStateless(!isStateless)}
+                        title="Stateless mode prevents cookies/session sharing between tabs"
+                    >
+                         <div className={`w-3 h-3 rounded-full transition-colors ${isStateless ? 'bg-pink-500 shadow-[0_0_8px_rgba(236,72,153,0.5)]' : 'bg-slate-500'}`}></div>
+                         <span className={`text-xs font-medium ${isStateless ? 'text-pink-200' : 'text-slate-300'}`}>
+                            {isStateless ? 'Stateless' : 'Standard'}
+                         </span>
+                    </div>
+
+                    {/* Cache Bust Toggle */}
+                    <div 
+                        className={`flex items-center space-x-2 rounded px-3 py-1.5 border transition-all cursor-pointer select-none ${isCacheBust ? 'bg-emerald-900/30 border-emerald-700/50' : 'bg-slate-800 border-slate-700 hover:border-slate-600'}`}
+                        onClick={() => setIsCacheBust(!isCacheBust)}
+                        title="Appends a timestamp to URLs to force fresh network requests"
+                    >
+                         <div className={`w-3 h-3 rounded-full transition-colors ${isCacheBust ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-slate-500'}`}></div>
+                         <span className={`text-xs font-medium ${isCacheBust ? 'text-emerald-200' : 'text-slate-300'}`}>
+                            {isCacheBust ? 'No Cache' : 'Cached'}
+                         </span>
                     </div>
 
                     <div className="flex items-center space-x-2 ml-auto bg-slate-800 p-1.5 rounded border border-slate-700">
@@ -125,8 +242,13 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                         >
                             {/* Frame Header */}
                             <div className="flex items-center p-2 bg-slate-900 border-b border-slate-700 space-x-2">
-                                <div className="flex items-center space-x-1.5 mr-1" title={frame.isLocked ? "Locked: Independent" : "Active: Synced"}>
-                                    <div className={`w-2 h-2 rounded-full ${frame.isLocked ? 'bg-orange-500' : 'bg-emerald-500'}`}></div>
+                                <div className="flex items-center space-x-1.5 mr-1">
+                                    <div className={`w-2 h-2 rounded-full transition-colors duration-500 ${
+                                        frame.isLocked ? 'bg-orange-500' : 
+                                        frame.status === 'active' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]' : 
+                                        frame.status === 'scheduled' ? 'bg-yellow-500 animate-pulse' :
+                                        'bg-slate-600'
+                                    }`}></div>
                                 </div>
                                 
                                 <span className="text-[10px] font-mono text-slate-500 select-none">#{frame.id + 1}</span>
@@ -170,7 +292,7 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
 
                             {/* Iframe Container */}
                             <div className="flex-1 relative bg-white overflow-hidden group-hover:shadow-inner">
-                                {frame.currentUrl ? (
+                                {frame.currentUrl && frame.status === 'active' ? (
                                     <div 
                                         className="absolute top-0 left-0 origin-top-left transition-transform duration-200 ease-out"
                                         style={{ 
@@ -180,40 +302,67 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                                         }}
                                     >
                                         <iframe 
-                                            key={frame.key}
+                                            key={`${frame.key}-${isStateless ? 'sl' : 'st'}-${isCacheBust ? 'cb' : 'nc'}`}
                                             src={getDisplayUrl(frame.currentUrl)}
                                             title={`Browser ${frame.id}`}
                                             className="w-full h-full border-0"
-                                            // More permissive sandbox settings to ensure functionality
-                                            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-popups-to-escape-sandbox allow-downloads"
+                                            // Conditional Sandbox
+                                            sandbox={getSandboxRules()}
                                             referrerPolicy="no-referrer"
-                                            loading="lazy"
+                                            loading="eager" 
                                         />
                                     </div>
                                 ) : (
-                                    <div className="w-full h-full flex flex-col items-center justify-center text-slate-400 p-4 bg-slate-50">
-                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mb-2 opacity-20 text-slate-800" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
-                                        </svg>
-                                        <span className="text-xs opacity-50 text-center font-medium text-slate-500">Waiting for URL</span>
+                                    <div className="w-full h-full flex flex-col items-center justify-center text-slate-400 p-4 bg-slate-50 transition-colors duration-300">
+                                        {frame.status === 'scheduled' ? (
+                                            <div className="flex flex-col items-center">
+                                                 <div className="w-8 h-8 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mb-3"></div>
+                                                 <span className="text-xs font-mono text-indigo-600 font-medium">Scheduled...</span>
+                                                 <span className="text-[10px] text-slate-400 mt-1">Waiting for slot</span>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mb-2 opacity-20 text-slate-800" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+                                                </svg>
+                                                <span className="text-xs opacity-50 text-center font-medium text-slate-500">Waiting for Input</span>
+                                            </>
+                                        )}
                                     </div>
                                 )}
                             </div>
                             
                             {/* Status Footer */}
-                            <div className="bg-slate-900 border-t border-slate-800 px-2 py-1 flex justify-between items-center">
-                                <span className="text-[9px] text-slate-600 font-mono uppercase">
-                                    {frame.currentUrl ? 'Active' : 'Idle'}
-                                </span>
+                            <div className="bg-slate-900 border-t border-slate-800 px-2 py-1 flex justify-between items-center h-6">
+                                <div className="flex items-center space-x-2">
+                                    <span className={`text-[9px] font-mono uppercase ${frame.status === 'active' ? 'text-emerald-400' : 'text-slate-600'}`}>
+                                        {frame.status}
+                                    </span>
+                                </div>
+                                <div className="flex items-center space-x-2">
+                                    {isCacheBust && (
+                                        <span className="text-[9px] text-emerald-600/70 font-mono" title="Cache Bust Active">
+                                            BUST
+                                        </span>
+                                    )}
+                                    {isStateless && (
+                                        <span className="text-[9px] text-pink-600/70 font-mono" title="Stateless Mode Active">
+                                            NO-COOKIES
+                                        </span>
+                                    )}
+                                </div>
                             </div>
                         </div>
                     ))}
                 </div>
                 
                 {(!masterUrl && frames.every(f => !f.currentUrl)) && (
-                    <div className="mt-8 text-center">
+                    <div className="mt-8 text-center animate-fade-in">
                         <p className="text-slate-500 text-sm">
-                            Tip: Try <span className="text-indigo-400 font-mono bg-slate-800 px-1 rounded">wikipedia.org</span> to test the grid.
+                            Ready to browse. Enter a URL above to start the grid.
+                        </p>
+                        <p className="text-slate-600 text-xs mt-2">
+                            Note: Some major sites (Google, YouTube) may block embedded views.
                         </p>
                     </div>
                 )}
