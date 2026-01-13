@@ -12,21 +12,11 @@ interface FrameData {
     isLocked: boolean; // If true, doesn't sync with master URL
 }
 
-const REGIONS = [
-    { id: 'direct', name: 'Direct (My IP)', prefix: '' },
-    { id: 'us', name: 'United States (via CORS Proxy)', prefix: 'https://corsproxy.io/?' },
-    { id: 'custom', name: 'Custom / Private Proxy', prefix: '' }
-];
-
 const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
     const [frames, setFrames] = useState<FrameData[]>([]);
     const [scale, setScale] = useState(0.75); // Default scaled down for better visibility
     const [isSyncing, setIsSyncing] = useState(true);
     
-    // Region / Proxy Settings
-    const [selectedRegion, setSelectedRegion] = useState(REGIONS[0].id);
-    const [customProxyPrefix, setCustomProxyPrefix] = useState('');
-
     // Initialize frames
     useEffect(() => {
         setFrames(Array(count).fill(null).map((_, i) => ({
@@ -54,20 +44,6 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
         if (!final.startsWith('http://') && !final.startsWith('https://')) {
             final = `https://${final}`;
         }
-
-        // Determine Prefix
-        let prefix = '';
-        if (selectedRegion === 'us') {
-            prefix = REGIONS[1].prefix;
-        } else if (selectedRegion === 'custom') {
-            prefix = customProxyPrefix;
-        }
-
-        // Apply Prefix
-        if (prefix) {
-            final = `${prefix}${encodeURIComponent(final)}`;
-        }
-        
         return final;
     };
 
@@ -119,22 +95,6 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                         <label htmlFor="syncToggle" className="text-sm text-slate-300 cursor-pointer select-none">Sync URLs</label>
                     </div>
 
-                    {/* Region Selector */}
-                    <div className="flex items-center space-x-2 bg-slate-800 rounded px-3 py-1 border border-slate-700">
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                        <select 
-                            value={selectedRegion}
-                            onChange={(e) => setSelectedRegion(e.target.value)}
-                            className="bg-transparent text-sm text-slate-300 border-none focus:ring-0 cursor-pointer py-1"
-                        >
-                            {REGIONS.map(region => (
-                                <option key={region.id} value={region.id}>{region.name}</option>
-                            ))}
-                        </select>
-                    </div>
-
                     <div className="flex items-center space-x-2 ml-auto bg-slate-800 p-1.5 rounded border border-slate-700">
                         <span className="text-xs text-slate-400 pl-1">Zoom:</span>
                         <input 
@@ -149,26 +109,6 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                         <span className="text-xs w-8 text-right font-mono text-slate-400">{Math.round(scale * 100)}%</span>
                     </div>
                 </div>
-
-                {/* Custom Proxy Panel */}
-                {selectedRegion === 'custom' && (
-                    <div className="bg-slate-800/50 border-t border-slate-700 p-4 animate-in fade-in slide-in-from-top-1 duration-200">
-                        <div className="max-w-4xl">
-                             <div className="flex flex-col md:flex-row gap-4 items-center">
-                                <div className="flex-1 w-full">
-                                    <label className="block text-xs text-slate-400 mb-1">Custom Web Proxy Prefix</label>
-                                    <input 
-                                        type="text" 
-                                        value={customProxyPrefix}
-                                        onChange={(e) => setCustomProxyPrefix(e.target.value)}
-                                        placeholder="Enter proxy URL (e.g. https://my-us-proxy.com/?url=)"
-                                        className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm text-white focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
-                                    />
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                )}
             </div>
 
             {/* Grid Area */}
@@ -265,12 +205,6 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                                 <span className="text-[9px] text-slate-600 font-mono uppercase">
                                     {frame.currentUrl ? 'Active' : 'Idle'}
                                 </span>
-                                {frame.currentUrl && selectedRegion !== 'direct' && (
-                                    <span className="text-[9px] text-indigo-400 font-mono flex items-center">
-                                        <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full mr-1"></span>
-                                        {selectedRegion === 'us' ? 'US PROXY' : 'CUSTOM PROXY'}
-                                    </span>
-                                )}
                             </div>
                         </div>
                     ))}
