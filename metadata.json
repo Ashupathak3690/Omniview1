@@ -1,0 +1,5 @@
+{
+  "name": "Copy OmniView Command Center",
+  "description": "A multi-view browser command center capable of opening 10 simultaneous browser instances with proxy routing capabilities.",
+  "requestFramePermissions": []
+}
