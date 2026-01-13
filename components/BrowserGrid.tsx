@@ -8,21 +8,27 @@ interface BrowserGridProps {
 interface FrameData {
     id: number;
     currentUrl: string;
-    key: number; // Used to force iframe reload
-    isLocked: boolean; // If true, doesn't sync with master URL
-    status: 'idle' | 'scheduled' | 'active'; // Track loading state
+    key: number;
+    isLocked: boolean;
+    status: 'idle' | 'scheduled' | 'active';
+    sessionId: string; // Unique ID for this frame's "user"
 }
 
 const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
     const [frames, setFrames] = useState<FrameData[]>([]);
     const [scale, setScale] = useState(0.75); 
     const [isSyncing, setIsSyncing] = useState(true);
-    const [isStateless, setIsStateless] = useState(false); // Strict Sandbox Mode
-    const [isCacheBust, setIsCacheBust] = useState(false); // Cache busting
-    const [loadingDelay, setLoadingDelay] = useState(800); // ms between loads
     
-    // Refs to manage timeouts preventing memory leaks
+    // "Ghost Mode" bundles multiple isolation features
+    const [ghostMode, setGhostMode] = useState(false); 
+    
+    const [loadingDelay, setLoadingDelay] = useState(800);
+    
+    // Refs
     const timeoutsRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+
+    // Generate a random session ID (pseudo-UUID)
+    const generateSessionId = () => Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 
     // Initialize frames
     useEffect(() => {
@@ -31,7 +37,8 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
             currentUrl: '',
             key: 0,
             isLocked: false,
-            status: 'idle'
+            status: 'idle',
+            sessionId: generateSessionId() // Assign distinct identity on creation
         })));
         return () => clearTimeouts();
     }, [count]);
@@ -41,10 +48,8 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
         timeoutsRef.current = [];
     };
 
-    // Helper to schedule frames sequentially
     const scheduleFrames = (framesToSchedule: number[]) => {
         clearTimeouts();
-        
         framesToSchedule.forEach((frameId, index) => {
             const timeout = setTimeout(() => {
                 setFrames(prev => prev.map(f => {
@@ -52,7 +57,7 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                         return {
                             ...f,
                             status: 'active',
-                            key: f.key + 1 // Force reload
+                            key: f.key + 1
                         };
                     }
                     return f;
@@ -62,38 +67,42 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
         });
     };
 
-    // Effect for Master URL changes
     useEffect(() => {
         if (isSyncing && masterUrl) {
-            // 1. Set all relevant frames to scheduled state immediately
             setFrames(prev => prev.map(f => {
                 if (f.isLocked) return f;
                 return { ...f, currentUrl: masterUrl, status: 'scheduled' };
             }));
 
-            // 2. Trigger the sequencer
             const unlockedIds = frames.filter(f => !f.isLocked).map(f => f.id);
-            // We use a slight delay to ensure state update #1 has processed or simply call sequencer
-            // But we can't access updated 'frames' state inside this effect immediately if we used it directly.
-            // Using IDs is safer.
             scheduleFrames(unlockedIds);
         } else if (!masterUrl) {
-            // Reset if empty
              setFrames(prev => prev.map(f => f.isLocked ? f : { ...f, currentUrl: '', status: 'idle' }));
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [masterUrl, isSyncing, loadingDelay]); 
 
-    const getDisplayUrl = (urlStr: string) => {
+    // Handle Ghost Mode Toggling
+    useEffect(() => {
+        if (ghostMode) {
+            // When Ghost Mode activates, regenerate all session IDs to ensure freshness
+            setFrames(prev => prev.map(f => ({ ...f, sessionId: generateSessionId(), key: f.key + 1 })));
+        }
+    }, [ghostMode]);
+
+    const getDisplayUrl = (urlStr: string, sessionId: string) => {
         if (!urlStr) return '';
         let final = urlStr.trim();
         if (!final.startsWith('http://') && !final.startsWith('https://')) {
             final = `https://${final}`;
         }
         
-        if (isCacheBust) {
+        // If Ghost Mode is active, we append unique signatures
+        if (ghostMode) {
             const separator = final.includes('?') ? '&' : '?';
-            final = `${final}${separator}_cb=${Date.now()}`;
+            // _uid: Represents the "User ID" for this frame
+            // _cb: Cache buster timestamp for this specific request
+            final = `${final}${separator}_uid=${sessionId}&_cb=${Date.now()}`;
         }
 
         return final;
@@ -104,9 +113,13 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
     };
 
     const handleRefreshAll = () => {
-        // 1. Set all active/unlocked frames to scheduled
         const framesToRefresh = frames.filter(f => f.currentUrl && (!f.isLocked || f.status !== 'idle')).map(f => f.id);
         
+        // In Ghost Mode, refresh means "New Session", so regenerate IDs
+        if (ghostMode) {
+             setFrames(prev => prev.map(f => ({...f, sessionId: generateSessionId()})));
+        }
+
         setFrames(prev => prev.map(f => {
             if (framesToRefresh.includes(f.id)) {
                 return { ...f, status: 'scheduled' };
@@ -114,7 +127,6 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
             return f;
         }));
 
-        // 2. Schedule them
         scheduleFrames(framesToRefresh);
     };
 
@@ -131,31 +143,37 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
         setFrames(prev => prev.map(f => f.id === id ? { ...f, isLocked: !f.isLocked } : f));
     };
 
-    // Strict Mode: Removes 'allow-same-origin' to prevent cookie sharing
+    // Strict Sandbox Logic
     const getSandboxRules = () => {
         const base = "allow-scripts allow-forms allow-popups allow-modals allow-popups-to-escape-sandbox allow-downloads";
-        return isStateless ? base : `${base} allow-same-origin`;
+        // In Ghost Mode, we strictly REMOVE 'allow-same-origin'
+        // This forces the browser to treat the content as opaque/unique origin, preventing cookie access.
+        return ghostMode ? base : `${base} allow-same-origin`;
     };
 
     return (
         <div className="flex flex-col h-full bg-slate-900/50">
             {/* Toolbar */}
-            <div className="flex flex-col border-b border-slate-800 bg-slate-900 sticky top-0 z-30 shadow-md">
+            <div className={`flex flex-col border-b sticky top-0 z-30 shadow-md transition-colors duration-500 ${ghostMode ? 'bg-slate-950 border-purple-900/50' : 'bg-slate-900 border-slate-800'}`}>
                 <div className="flex flex-wrap items-center gap-4 p-4">
                     <div className="flex items-center space-x-2">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Grid Controls</span>
+                        <span className={`text-xs font-bold uppercase tracking-wider ${ghostMode ? 'text-purple-400' : 'text-slate-400'}`}>
+                            {ghostMode ? 'Ghost Ops' : 'Grid Controls'}
+                        </span>
                     </div>
                     
                     <div className="h-6 w-px bg-slate-700 mx-2 hidden sm:block"></div>
 
                     <button 
                         onClick={handleRefreshAll}
-                        className="flex items-center space-x-1 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-sm transition-colors shadow-sm active:transform active:scale-95"
+                        className={`flex items-center space-x-1 px-3 py-1.5 text-white rounded text-sm transition-colors shadow-sm active:transform active:scale-95 ${
+                            ghostMode ? 'bg-purple-700 hover:bg-purple-600' : 'bg-indigo-600 hover:bg-indigo-500'
+                        }`}
                     >
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                         </svg>
-                        <span>Refresh All (Seq)</span>
+                        <span>Refresh All</span>
                     </button>
 
                     <div className="flex items-center space-x-2 bg-slate-800 rounded px-3 py-1.5 border border-slate-700">
@@ -169,8 +187,7 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                         <label htmlFor="syncToggle" className="text-sm text-slate-300 cursor-pointer select-none">Sync URLs</label>
                     </div>
 
-                    {/* Sequential Delay Control */}
-                    <div className="flex items-center space-x-2 bg-slate-800 rounded px-3 py-1.5 border border-slate-700" title="Delay between loading each browser to prevent rate limiting">
+                    <div className="flex items-center space-x-2 bg-slate-800 rounded px-3 py-1.5 border border-slate-700" title="Delay between loading each browser">
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
@@ -188,29 +205,27 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
 
                     <div className="h-6 w-px bg-slate-700 mx-2 hidden sm:block"></div>
 
-                    {/* Stateless Mode Toggle */}
-                    <div 
-                        className={`flex items-center space-x-2 rounded px-3 py-1.5 border transition-all cursor-pointer select-none ${isStateless ? 'bg-pink-900/30 border-pink-700/50' : 'bg-slate-800 border-slate-700 hover:border-slate-600'}`}
-                        onClick={() => setIsStateless(!isStateless)}
-                        title="Stateless mode prevents cookies/session sharing between tabs"
+                    {/* Ghost Mode Toggle */}
+                    <button 
+                        onClick={() => setGhostMode(!ghostMode)}
+                        className={`flex items-center space-x-2 px-3 py-1.5 rounded border transition-all duration-300 group ${
+                            ghostMode 
+                            ? 'bg-purple-900/40 border-purple-500 text-purple-200 shadow-[0_0_12px_rgba(168,85,247,0.3)]' 
+                            : 'bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-500'
+                        }`}
+                        title="Enable Unique Visitor Simulation (No Cookies + Unique IDs)"
                     >
-                         <div className={`w-3 h-3 rounded-full transition-colors ${isStateless ? 'bg-pink-500 shadow-[0_0_8px_rgba(236,72,153,0.5)]' : 'bg-slate-500'}`}></div>
-                         <span className={`text-xs font-medium ${isStateless ? 'text-pink-200' : 'text-slate-300'}`}>
-                            {isStateless ? 'Stateless' : 'Standard'}
-                         </span>
-                    </div>
-
-                    {/* Cache Bust Toggle */}
-                    <div 
-                        className={`flex items-center space-x-2 rounded px-3 py-1.5 border transition-all cursor-pointer select-none ${isCacheBust ? 'bg-emerald-900/30 border-emerald-700/50' : 'bg-slate-800 border-slate-700 hover:border-slate-600'}`}
-                        onClick={() => setIsCacheBust(!isCacheBust)}
-                        title="Appends a timestamp to URLs to force fresh network requests"
-                    >
-                         <div className={`w-3 h-3 rounded-full transition-colors ${isCacheBust ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-slate-500'}`}></div>
-                         <span className={`text-xs font-medium ${isCacheBust ? 'text-emerald-200' : 'text-slate-300'}`}>
-                            {isCacheBust ? 'No Cache' : 'Cached'}
-                         </span>
-                    </div>
+                         <div className={`relative w-4 h-4 flex items-center justify-center`}>
+                             <svg xmlns="http://www.w3.org/2000/svg" className={`w-4 h-4 transition-all ${ghostMode ? 'text-purple-400' : 'text-slate-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                            </svg>
+                            {ghostMode && <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500"></span>
+                            </span>}
+                         </div>
+                         <span className="text-sm font-medium">Ghost Mode</span>
+                    </button>
 
                     <div className="flex items-center space-x-2 ml-auto bg-slate-800 p-1.5 rounded border border-slate-700">
                         <span className="text-xs text-slate-400 pl-1">Zoom:</span>
@@ -226,6 +241,18 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                         <span className="text-xs w-8 text-right font-mono text-slate-400">{Math.round(scale * 100)}%</span>
                     </div>
                 </div>
+                
+                {/* Ghost Mode Explainer Banner */}
+                {ghostMode && (
+                    <div className="bg-purple-900/20 border-t border-purple-900/50 py-1 px-4 flex justify-center items-center space-x-3 text-xs text-purple-200">
+                        <span className="font-bold tracking-wide">UNIQUE VISITOR SIMULATION ACTIVE:</span>
+                        <span className="opacity-75">Cookies Disabled</span>
+                        <span className="w-1 h-1 bg-purple-500 rounded-full"></span>
+                        <span className="opacity-75">Cache Disabled</span>
+                        <span className="w-1 h-1 bg-purple-500 rounded-full"></span>
+                        <span className="opacity-75">Unique URL Signatures</span>
+                    </div>
+                )}
             </div>
 
             {/* Grid Area */}
@@ -236,7 +263,8 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                             key={frame.id} 
                             className={`
                                 flex flex-col bg-slate-800 rounded-lg overflow-hidden border shadow-lg transition-all duration-300
-                                ${frame.isLocked ? 'border-orange-500/50 shadow-orange-500/10' : 'border-slate-700 hover:border-sky-500/50'}
+                                ${frame.isLocked ? 'border-orange-500/50 shadow-orange-500/10' : 
+                                  ghostMode ? 'border-purple-800/30 hover:border-purple-500/50' : 'border-slate-700 hover:border-sky-500/50'}
                             `}
                             style={{ height: '340px' }}
                         >
@@ -245,7 +273,7 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                                 <div className="flex items-center space-x-1.5 mr-1">
                                     <div className={`w-2 h-2 rounded-full transition-colors duration-500 ${
                                         frame.isLocked ? 'bg-orange-500' : 
-                                        frame.status === 'active' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]' : 
+                                        frame.status === 'active' ? (ghostMode ? 'bg-purple-400 shadow-[0_0_8px_rgba(192,132,252,0.4)]' : 'bg-emerald-500') : 
                                         frame.status === 'scheduled' ? 'bg-yellow-500 animate-pulse' :
                                         'bg-slate-600'
                                     }`}></div>
@@ -261,7 +289,9 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                                         flex-1 bg-slate-800 border text-xs rounded px-2 py-1 focus:outline-none focus:ring-1 transition-colors truncate font-mono
                                         ${frame.isLocked 
                                             ? 'border-orange-500/30 text-orange-200 focus:border-orange-500 focus:ring-orange-500/20' 
-                                            : 'border-slate-700 text-slate-300 focus:border-indigo-500 focus:ring-indigo-500/20'}
+                                            : ghostMode
+                                                ? 'border-slate-700 text-purple-200 focus:border-purple-500 focus:ring-purple-500/20 placeholder-purple-800'
+                                                : 'border-slate-700 text-slate-300 focus:border-indigo-500 focus:ring-indigo-500/20'}
                                     `}
                                     placeholder="Enter URL..."
                                 />
@@ -282,7 +312,7 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                                 <button 
                                     onClick={() => handleRefresh(frame.id)}
                                     className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
-                                    title="Refresh Frame"
+                                    title="Refresh Frame (New Session ID)"
                                 >
                                     <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -302,11 +332,10 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                                         }}
                                     >
                                         <iframe 
-                                            key={`${frame.key}-${isStateless ? 'sl' : 'st'}-${isCacheBust ? 'cb' : 'nc'}`}
-                                            src={getDisplayUrl(frame.currentUrl)}
+                                            key={`${frame.key}-${ghostMode ? 'gm' : 'std'}-${frame.sessionId}`}
+                                            src={getDisplayUrl(frame.currentUrl, frame.sessionId)}
                                             title={`Browser ${frame.id}`}
                                             className="w-full h-full border-0"
-                                            // Conditional Sandbox
                                             sandbox={getSandboxRules()}
                                             referrerPolicy="no-referrer"
                                             loading="eager" 
@@ -316,9 +345,13 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                                     <div className="w-full h-full flex flex-col items-center justify-center text-slate-400 p-4 bg-slate-50 transition-colors duration-300">
                                         {frame.status === 'scheduled' ? (
                                             <div className="flex flex-col items-center">
-                                                 <div className="w-8 h-8 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mb-3"></div>
-                                                 <span className="text-xs font-mono text-indigo-600 font-medium">Scheduled...</span>
-                                                 <span className="text-[10px] text-slate-400 mt-1">Waiting for slot</span>
+                                                 <div className={`w-8 h-8 border-2 border-t-transparent rounded-full animate-spin mb-3 ${ghostMode ? 'border-purple-200 border-t-purple-600' : 'border-indigo-200 border-t-indigo-600'}`}></div>
+                                                 <span className={`text-xs font-mono font-medium ${ghostMode ? 'text-purple-600' : 'text-indigo-600'}`}>
+                                                    {ghostMode ? 'Ghosting...' : 'Loading...'}
+                                                 </span>
+                                                 <span className="text-[10px] text-slate-400 mt-1">
+                                                    {ghostMode ? 'Creating Identity' : 'Waiting for slot'}
+                                                 </span>
                                             </div>
                                         ) : (
                                             <>
@@ -335,22 +368,17 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                             {/* Status Footer */}
                             <div className="bg-slate-900 border-t border-slate-800 px-2 py-1 flex justify-between items-center h-6">
                                 <div className="flex items-center space-x-2">
-                                    <span className={`text-[9px] font-mono uppercase ${frame.status === 'active' ? 'text-emerald-400' : 'text-slate-600'}`}>
+                                    <span className={`text-[9px] font-mono uppercase ${frame.status === 'active' ? (ghostMode ? 'text-purple-400' : 'text-emerald-400') : 'text-slate-600'}`}>
                                         {frame.status}
                                     </span>
                                 </div>
-                                <div className="flex items-center space-x-2">
-                                    {isCacheBust && (
-                                        <span className="text-[9px] text-emerald-600/70 font-mono" title="Cache Bust Active">
-                                            BUST
+                                {ghostMode && (
+                                    <div className="flex items-center space-x-2">
+                                        <span className="text-[9px] text-purple-600/70 font-mono flex items-center" title="Unique User Identity Assigned">
+                                            ID: {frame.sessionId.substring(0,6)}...
                                         </span>
-                                    )}
-                                    {isStateless && (
-                                        <span className="text-[9px] text-pink-600/70 font-mono" title="Stateless Mode Active">
-                                            NO-COOKIES
-                                        </span>
-                                    )}
-                                </div>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     ))}
@@ -359,10 +387,7 @@ const BrowserGrid: React.FC<BrowserGridProps> = ({ url: masterUrl, count }) => {
                 {(!masterUrl && frames.every(f => !f.currentUrl)) && (
                     <div className="mt-8 text-center animate-fade-in">
                         <p className="text-slate-500 text-sm">
-                            Ready to browse. Enter a URL above to start the grid.
-                        </p>
-                        <p className="text-slate-600 text-xs mt-2">
-                            Note: Some major sites (Google, YouTube) may block embedded views.
+                            Ready. Enable <span className="text-purple-400 font-bold">Ghost Mode</span> to simulate unique users.
                         </p>
                     </div>
                 )}
